@@ -17,20 +17,6 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# HIDE STREAMLIT BRANDING
-# -------------------------------------------------
-st.markdown(
-    """
-    <style>
-    footer {visibility: hidden;}
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-# -------------------------------------------------
 # LOAD CSS
 # -------------------------------------------------
 def load_css(file):
@@ -80,7 +66,6 @@ st.subheader("🧪 Dataset Quality Analysis (Before Cleaning)")
 
 missing = df.isnull().sum()
 missing_percent = (missing / len(df)) * 100
-
 st.dataframe(pd.DataFrame({
     "Column": df.columns,
     "Missing Count": missing.values,
@@ -120,13 +105,17 @@ st.subheader("🧹 Data Cleaning")
 
 for col in df.columns:
     if df[col].dtype == "object":
-        df[col].fillna(df[col].mode()[0], inplace=True)
+        if df[col].isnull().all():
+            df[col] = df[col].fillna("Unknown")
+        else:
+            df[col].fillna(df[col].mode()[0], inplace=True)
     else:
         df[col].fillna(df[col].median(), inplace=True)
 
 cat_cols = df.select_dtypes(include=["object", "category"]).columns
 for col in cat_cols:
-    df[col] = LabelEncoder().fit_transform(df[col].astype(str))
+    df[col] = df[col].astype(str)
+    df[col] = LabelEncoder().fit_transform(df[col])
 
 num_cols = df.select_dtypes(include=np.number).columns
 for col in num_cols:
@@ -136,14 +125,16 @@ for col in num_cols:
     lower = Q1 - 1.5 * IQR
     upper = Q3 + 1.5 * IQR
 
-    outlier_pct = ((df[col] < lower) | (df[col] > upper)).mean() * 100
+    outlier_count = ((df[col] < lower) | (df[col] > upper)).sum()
+    outlier_pct = (outlier_count / len(df)) * 100
 
     if outlier_pct < 30:
         df = df[~((df[col] < lower) | (df[col] > upper))]
     else:
+        median = df[col].median()
         df[col] = np.where(
             (df[col] < lower) | (df[col] > upper),
-            df[col].median(),
+            median,
             df[col]
         )
 
@@ -162,7 +153,7 @@ st.subheader("🎯 Target Variable")
 target = st.selectbox("Select Dependent Variable (Y)", df.columns)
 
 # =================================================
-# MODEL SELECTION
+# MODEL SELECTION (NO DEFAULT)
 # =================================================
 st.subheader("🤖 Regression Model Selection")
 
@@ -175,24 +166,29 @@ model_type = st.selectbox(
         "Ridge Regression",
         "Lasso Regression",
         "ElasticNet Regression"
-    ]
+    ],
+    index=0
 )
 
 if model_type == "Select a model":
-    st.warning("Please select a regression model.")
+    st.warning("Please select a regression model to proceed.")
     st.stop()
 
 # =================================================
-# FEATURE SELECTION
+# INDEPENDENT VARIABLES
 # =================================================
 st.subheader("📌 Independent Variables")
+
 available_features = [c for c in df.columns if c != target]
 
 if model_type == "Simple Linear Regression":
-    features = [st.selectbox("Select ONE Independent Variable", available_features)]
+    features = [st.selectbox(
+        "Select ONLY ONE Independent Variable (X)",
+        available_features
+    )]
 else:
     features = st.multiselect(
-        "Select Independent Variables",
+        "Select Independent Variables (X)",
         available_features,
         default=available_features[:min(2, len(available_features))]
     )
@@ -214,7 +210,7 @@ scaler = StandardScaler()
 X_train_s = scaler.fit_transform(X_train)
 X_test_s = scaler.transform(X_test)
 
-models = {
+model_map = {
     "Simple Linear Regression": LinearRegression(),
     "Multiple Linear Regression": LinearRegression(),
     "Ridge Regression": Ridge(alpha=1.0),
@@ -222,7 +218,7 @@ models = {
     "ElasticNet Regression": ElasticNet(alpha=0.01, l1_ratio=0.5)
 }
 
-model = models[model_type]
+model = model_map[model_type]
 model.fit(X_train_s, y_train)
 y_pred = model.predict(X_test_s)
 
@@ -237,6 +233,47 @@ c2.metric("RMSE", f"{np.sqrt(mean_squared_error(y_test, y_pred)):.2f}")
 c3.metric("R² Score", f"{r2_score(y_test, y_pred):.3f}")
 
 # =================================================
+# REGRESSION EQUATION
+# =================================================
+st.subheader("📐 Regression Equation")
+
+equation = f"y = {model.intercept_:.3f}"
+for coef, feat in zip(model.coef_, features):
+    equation += f" + ({coef:.3f} × {feat})"
+
+st.markdown(f"""
+<div style="
+    background: linear-gradient(135deg, #1e293b, #0f172a);
+    color: #e5e7eb;
+    padding: 18px;
+    border-radius: 14px;
+    font-size: 18px;
+    font-weight: 600;
+    border-left: 5px solid #38bdf8;
+">
+{equation}
+</div>
+""", unsafe_allow_html=True)
+
+# =================================================
+# INTERPRETATION
+# =================================================
+st.subheader("📘 Model Interpretation")
+
+st.markdown(
+    f"📍 **Intercept (b₀): {model.intercept_:.3f}** → "
+    f"When all independent variables are zero, "
+    f"the predicted **{target}** is **{model.intercept_:.3f}**."
+)
+
+for coef, feat in zip(model.coef_, features):
+    st.markdown(
+        f"📌 **Slope for {feat} (b): {coef:.3f}** → "
+        f"For every 1 unit increase in **{feat}**, "
+        f"the target **{target}** changes by **{coef:.3f} units**."
+    )
+
+# =================================================
 # VISUALIZATION
 # =================================================
 st.subheader("📈 Model Visualization")
@@ -246,19 +283,25 @@ ax.scatter(y_test, y_pred, alpha=0.6)
 ax.plot([y_test.min(), y_test.max()],
         [y_test.min(), y_test.max()],
         color="red")
-ax.set_xlabel("Actual")
-ax.set_ylabel("Predicted")
+ax.set_xlabel("Actual Values")
+ax.set_ylabel("Predicted Values")
 st.pyplot(fig)
 
 # =================================================
-# PREDICTION
+# PREDICTION (BIG DISPLAY)
 # =================================================
 st.subheader("✨ Make a Prediction")
 
 input_data = {}
 for col in features:
-    min_val, max_val = float(df[col].min()), float(df[col].max())
-    input_data[col] = st.number_input(col, min_val, max_val)
+    min_val = float(df[col].min())
+    max_val = float(df[col].max())
+
+    if min_val == max_val:
+        input_data[col] = min_val
+        st.info(f"{col} is constant ({min_val})")
+    else:
+        input_data[col] = st.number_input(col, min_val, max_val)
 
 input_df = pd.DataFrame([input_data])
 input_scaled = scaler.transform(input_df)
@@ -273,11 +316,14 @@ st.markdown(f"""
     margin-top: 25px;
     text-align: center;
     box-shadow: 0px 15px 35px rgba(0,0,0,0.35);
+    border-left: 6px solid #38bdf8;
 ">
     <h2>🔮 Prediction Result</h2>
-    <h1 style="font-size:48px;color:#22d3ee;">
+    <h1 style="font-size:48px;color:#22d3ee;margin:10px 0;">
         {prediction[0]:.2f}
     </h1>
-    <p>Predicted <b>{target}</b></p>
+    <p style="font-size:18px;">
+        Predicted <b>{target}</b> based on selected input values
+    </p>
 </div>
 """, unsafe_allow_html=True)
